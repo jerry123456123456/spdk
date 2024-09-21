@@ -1,13 +1,12 @@
-#include <dlfcn.h>
 #include <stdio.h>
 #include <spdk/event.h>
 #include <spdk/blob.h>
 #include <spdk/bdev.h>
 #include <spdk/env.h>
 #include <spdk/blob_bdev.h>
-#include <spdk/env.h>
-#include <spdk/json.h>
-#include <string.h>  // 添加此行
+
+#include <unistd.h>
+#include <sys/syscall.h>
 
 
 #define FILENAME_LENGTH 128
@@ -385,10 +384,13 @@ static int zvfs_close(int fd) {
 
 ///////////////////////////////hook
 /// hook
-#define DEBUG_ENABLE 1
+#include <dlfcn.h>
 
-#if DEBUG_ENABLE 
-#define dblog(fmt, ...)   printf(fmt, ##__VA_ARGS__)
+
+#define DEBUG_ENABLE	1
+
+#if DEBUG_ENABLE
+#define dblog(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #else
 #define dblog(fmt, ...)
 #endif
@@ -396,50 +398,67 @@ static int zvfs_close(int fd) {
 typedef int (*open_t)(const char *pathname, int flags);
 open_t open_f = NULL;
 
-typedef ssize_t (*read_t)(int fd, void *buf, size_t count);
-read_t read_f = NULL;
-
-typedef ssize_t (*write_t)(int fd, const void *buf, size_t count);
+typedef ssize_t (*write_t)(int fd, const void *buf, size_t n);
 write_t write_f = NULL;
+
+typedef ssize_t (*read_t)(int fd, void *buf, size_t n);
+read_t read_f = NULL;
 
 typedef int (*close_t)(int fd);
 close_t close_f = NULL;
 
 int open(const char *pathname, int flags, ...) {
+
 	if (!open_f) {
 		open_f = dlsym(RTLD_NEXT, "open");
 	}
-	dblog("open .. %s\n", pathname);
-	return zvfs_create(pathname, flags);
+
+	dblog("open.. %s\n", pathname);
+
+	return open_f(pathname, flags);
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
+
+	ssize_t ret;
+
 	if (!read_f) {
 		read_f = dlsym(RTLD_NEXT, "read");
 	}
-	dblog("read ..\n");
-	return zvfs_read(fd, buf, count);
+
+	ret = read_f(fd, buf, count);
+	dblog("read.. : %ld, %ld\n", ret, count);
+
+	return ret;
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
+
 	if (!write_f) {
 		write_f = dlsym(RTLD_NEXT, "write");
 	}
-	dblog("write ..\n");
-	return zvfs_write(fd, buf, count);
+
+	dblog("write.. : %ld\n", count);
+
+	return write_f(fd, buf, count);
+
 }
 
 int close(int fd) {
+
 	if (!close_f) {
 		close_f = dlsym(RTLD_NEXT, "close");
 	}
-	dblog("close ..\n");
-	return zvfs_close(fd);
+
+	dblog("close..\n");
+
+	return close_f(fd);
+
 }
 
 
 ///////////////////////////////main
-
+#if 0
 int main(int argc,char *argv[]){
     printf("hello spdk\n");
     int fd = open("a.txt", O_RDWR | O_CREAT);
@@ -451,3 +470,4 @@ int main(int argc,char *argv[]){
 	close(fd);
     return 0;
 }
+#endif
