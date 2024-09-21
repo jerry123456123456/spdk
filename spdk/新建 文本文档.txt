@@ -1,0 +1,1 @@
+LD_PRELOAD=/root/zvfs/spdk/build/lib/libspdk_jerryfs.so /etc/init.d/mysql restart
