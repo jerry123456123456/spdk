@@ -1,13 +1,19 @@
+#include <dlfcn.h>
+
 #include <stdio.h>
 #include <spdk/event.h>
+#include <spdk/thread.h>
+
 #include <spdk/blob.h>
 #include <spdk/bdev.h>
 #include <spdk/env.h>
+
 #include <spdk/blob_bdev.h>
 
-#include <unistd.h>
-#include <sys/syscall.h>
+#include<spdk/json.h>
+#include<spdk/jsonrpc.h>
 
+#include<string.h>
 
 #define FILENAME_LENGTH 128
 
@@ -259,7 +265,7 @@ static void zvfs_entry(void *arg){
 }
 
 ////////////////////////////////json
-static const char *json_file="/root/zvfs/hello_blob.json";
+static const char *json_file="/home/jerry/Desktop/questionnare/questionnare-src/spdk/hello_blob.json";
 static void json_app_load_done(int rc,void *ctx){
     bool *done=ctx;
     *done=true;
@@ -282,19 +288,21 @@ static unsigned fd_table[MAX_FD_COUNT / 8] = {0};
 
 static int zvfs_get_fd(void) {
     int fd = DEFAULT_FD_NUM;
-	for ( ; fd < MAX_FD_COUNT; fd++) {
-		if ((fd_table[fd/8] & (0x1 << (fd % 8))) == 0) {
-			fd_table[fd/8] |= (0x1 << (fd % 8));
+	for (; fd < MAX_FD_COUNT; fd++) {
+		if ((fd_table[fd / 8] & (0x1 << (fd % 8))) == 0) {
+			fd_table[fd / 8] |= (0x1 << (fd % 8)); // Mark fd as allocated
 			return fd;
 		}
 	}
-	return -1;
+	return -1; // Return error if no fd is available
 }
 
+
 static void zvfs_set_fd(int fd) {
-	if (fd >= MAX_FD_COUNT) return ; // errno
-	fd_table[fd/8] &= ~(0x1 << fd % 8);
+	if (fd < DEFAULT_FD_NUM || fd >= MAX_FD_COUNT) return ; // Invalid fd
+	fd_table[fd / 8] &= ~(0x1 << (fd % 8)); // Mark fd as free
 }
+
 
 ////////////////////////////////文件系统初始化
 static int zvfs_filesystem_setup(void){
@@ -326,6 +334,8 @@ static int zvfs_filesystem_setup(void){
 }
 
 static int zvfs_create(const char *pathname,int flags){
+    printf("调用自定义的open函数\n");
+
     if(!fs_instance){
         zvfs_filesystem_setup();
     }
@@ -346,46 +356,50 @@ static int zvfs_create(const char *pathname,int flags){
 
 ///////////////////////////////zvfs的具体接口
 static ssize_t zvfs_write(int fd, const void *buf, size_t count) {
+    printf("调用自定义的write函数\n");
 
-	zvfs_file_t *file = files[fd];
-	if(!file) return -1;
-	
-	memcpy(file->write_buffer, buf, count);
-	zvfs_file_write(file);
+    zvfs_file_t *file = files[fd];
+    if (!file || !buf || count == 0) {
+        return -1; // Return error if file or buffer is invalid
+    }
 
-	return 0;
+    memcpy(file->write_buffer, buf, count);
+    zvfs_file_write(file); // Perform the write operation asynchronously
+    return count; // Return the number of bytes written
 }
+
 
 static ssize_t zvfs_read(int fd, void *buf, size_t count) {
+    printf("调用自定义的read函数\n");
 
-	zvfs_file_t *file = files[fd];
-	if(!file) return -1;
+    zvfs_file_t *file = files[fd];
+    if (!file || !buf || count == 0) {
+        return -1; // Return error if file or buffer is invalid
+    }
 
-	zvfs_file_read(file);
-	memcpy(buf, file->read_buffer, count);
-
-	return 0;
-
+    zvfs_file_read(file); // Perform the read operation asynchronously
+    memcpy(buf, file->read_buffer, count); // Copy data to user buffer
+    return count; // Return the number of bytes read
 }
+
 
 static int zvfs_close(int fd) {
+    printf("调用自定义的close函数\n");
 
-	zvfs_file_t *file = files[fd];
-	if (!file) return 0;
+    zvfs_file_t *file = files[fd];
+    if (!file) return -1; // Return error if file does not exist
 
-	zvfs_file_close(file);
-	zvfs_set_fd(fd);
+    zvfs_file_close(file); // Close the file
+    zvfs_set_fd(fd); // Mark fd as free
+    free(file); // Free the allocated memory
+    files[fd] = NULL;
 
-	free(file);
-	files[fd] = NULL;
-
-	return 0;
+    return 0; // Return success
 }
+
 
 ///////////////////////////////hook
 /// hook
-#include <dlfcn.h>
-
 
 #define DEBUG_ENABLE	1
 
@@ -408,66 +422,52 @@ typedef int (*close_t)(int fd);
 close_t close_f = NULL;
 
 int open(const char *pathname, int flags, ...) {
+    printf("使用了自定义的函数\n");
 
-	if (!open_f) {
-		open_f = dlsym(RTLD_NEXT, "open");
-	}
+    // 确保自定义 open 的调用是首次发生时才会查找原始系统调用
+    if (!open_f) {
+        open_f = dlsym(RTLD_NEXT, "open");
+    }
 
-	dblog("open.. %s\n", pathname);
+    dblog("open.. %s\n", pathname);
 
-	return open_f(pathname, flags);
+    // 调用 zfs_create，而不是直接调用原生 open
+    return zvfs_create(pathname, flags);
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
+    ssize_t ret;
 
-	ssize_t ret;
+    if (!read_f) {
+        read_f = dlsym(RTLD_NEXT, "read");
+    }
 
-	if (!read_f) {
-		read_f = dlsym(RTLD_NEXT, "read");
-	}
+    // 调用 zfs_read，而不是直接调用原生 read
+    ret = zvfs_read(fd, buf, count);
+    
+    dblog("read.. : %ld, %ld\n", ret, count);
 
-	ret = read_f(fd, buf, count);
-	dblog("read.. : %ld, %ld\n", ret, count);
-
-	return ret;
+    return ret;
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
+    if (!write_f) {
+        write_f = dlsym(RTLD_NEXT, "write");
+    }
 
-	if (!write_f) {
-		write_f = dlsym(RTLD_NEXT, "write");
-	}
-
-	dblog("write.. : %ld\n", count);
-
-	return write_f(fd, buf, count);
-
+    // 调用 zfs_write，而不是直接调用原生 write
+    dblog("write.. : %ld\n", count);
+    
+    return zvfs_write(fd, buf, count);
 }
 
 int close(int fd) {
+    if (!close_f) {
+        close_f = dlsym(RTLD_NEXT, "close");
+    }
 
-	if (!close_f) {
-		close_f = dlsym(RTLD_NEXT, "close");
-	}
+    dblog("close..\n");
 
-	dblog("close..\n");
-
-	return close_f(fd);
-
+    // 调用 zfs_close，而不是直接调用原生 close
+    return zvfs_close(fd);
 }
-
-
-///////////////////////////////main
-#if 0
-int main(int argc,char *argv[]){
-    printf("hello spdk\n");
-    int fd = open("a.txt", O_RDWR | O_CREAT);
-    char *wbuffer = "zvoice.jerry"; 
-	int ret = write(fd, wbuffer, strlen(wbuffer));
-	char rbuffer[1024] = {0};
-	ret = read(fd, rbuffer, 1024);
-	printf("ret: %d, rbuffer: %s\n", ret, rbuffer);
-	close(fd);
-    return 0;
-}
-#endif
